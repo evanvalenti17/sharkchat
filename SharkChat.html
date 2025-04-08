@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SafeWaters Chatbot</title>
+  <style>
+    /* Overall page layout with modern white background and brand colors */
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #ffffff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
+        Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      color: #333;
+    }
+
+    /* Chat container: messages appear from bottom up */
+    .chat-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      overflow-y: auto;
+      padding: 10px;
+      background-color: #ffffff;
+    }
+
+    /* Chat bubbles */
+    .message {
+      max-width: 75%;
+      margin: 6px 0;
+      padding: 10px 14px;
+      border-radius: 16px;
+      line-height: 1.4;
+      word-wrap: break-word;
+      font-size: 15px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      white-space: pre-wrap;
+    }
+    .assistant-message {
+      align-self: flex-start;
+      background-color: #f2f2f2; /* light gray for assistant bubbles */
+      color: #333;
+    }
+    .user-message {
+      align-self: flex-end;
+      background-color: #0077b6; /* SafeWaters brand blue */
+      color: #fff;
+    }
+
+    /* Input area */
+    .input-container {
+      display: flex;
+      align-items: center;
+      background-color: #fff;
+      padding: 8px;
+      border-top: 1px solid #ccc;
+    }
+    .input-field {
+      flex: 1;
+      font-size: 16px;
+      border: 1px solid #ccc;
+      border-radius: 18px;
+      padding: 8px 12px;
+      outline: none;
+    }
+    .input-field:focus {
+      border-color: #0077b6;
+    }
+    .send-button {
+      background-color: #0077b6;
+      color: #fff;
+      border: none;
+      border-radius: 18px;
+      padding: 8px 16px;
+      margin-left: 8px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .send-button:hover {
+      background-color: #005b8a;
+    }
+
+    /* Responsive tweaks */
+    @media (max-width: 600px) {
+      .message {
+        font-size: 14px;
+        padding: 8px 12px;
+      }
+      .input-field {
+        font-size: 14px;
+        padding: 6px 10px;
+      }
+      .send-button {
+        font-size: 14px;
+        padding: 6px 12px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- Chat container -->
+  <div class="chat-container" id="chatContainer"></div>
+
+  <!-- Input area -->
+  <div class="input-container">
+    <input type="text" id="userInput" class="input-field" placeholder="Type your message..." disabled />
+    <button id="sendButton" class="send-button" disabled>Send</button>
+  </div>
+
+  <script>
+    // -------------------------
+    // Configuration
+    // -------------------------
+    const API_KEY = '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';
+    const BASE_URL = 'https://api.openai.com/v1';
+    const ASSISTANT_ID = "asst_kiKDgq50fQ71ao5iLsx7rSur";
+
+    // Global state variables
+    let threadId = localStorage.getItem('safeWatersThreadId');
+    let threadReady = false;  // true when a thread exists and is usable
+
+    // DOM element references
+    const chatContainer = document.getElementById('chatContainer');
+    const userInput = document.getElementById('userInput');
+    const sendButton = document.getElementById('sendButton');
+
+    // Store system message nodes to remove later (if needed)
+    let loadingMessageNode = null;
+    let introMessageNode = null;
+
+    // To avoid duplicate assistant messages
+    const displayedMessageIds = new Set();
+
+    // -------------------------
+    // Helper Functions
+    // -------------------------
+    function scrollToBottom() {
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
+
+    function addMessage(text, sender = 'assistant') {
+      const messageDiv = document.createElement('div');
+      messageDiv.classList.add('message');
+      messageDiv.classList.add(sender === 'assistant' ? 'assistant-message' : 'user-message');
+      messageDiv.textContent = text;
+      chatContainer.appendChild(messageDiv);
+      scrollToBottom();
+      return messageDiv;
+    }
+
+    function removeMessage(node) {
+      if (node && node.parentNode) {
+        node.parentNode.removeChild(node);
+      }
+    }
+
+    // -------------------------
+    // Create a new thread via API
+    // -------------------------
+    async function createThread() {
+      const payload = { assistant_id: ASSISTANT_ID };
+      try {
+        console.log("Attempting to create thread...");
+        const response = await fetch(`${BASE_URL}/threads`, {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + API_KEY,
+            'Content-Type': 'application/json',
+            'OpenAI-Beta': 'assistants=v2'
+          },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+          console.error("Thread creation failed:", response.status, response.statusText);
+          throw new Error("Thread creation failed: " + response.statusText);
+        }
+        const data = await response.json();
+        console.log("Thread created successfully:", data.id);
+        return data.id;
+      } catch (error) {
+        console.error("Error in createThread:", error);
+        return null;
+      }
+    }
+
+    // -------------------------
+    // Initialize the chat thread (on page load)
+    // -------------------------
+    async function initThread() {
+      if (!threadId) {
+        // Show a loading bubble
+        loadingMessageNode = addMessage("Please wait a moment while we set up your chat...", "assistant");
+
+        // Attempt to create the thread
+        threadId = await createThread();
+        if (threadId) {
+          localStorage.setItem('safeWatersThreadId', threadId);
+          threadReady = true;
+          removeMessage(loadingMessageNode);
+          introMessageNode = addMessage("Ask about previous attacks at specific beaches, number of attacks, most recent attacks, species involved, and much more", "assistant");
+        } else {
+          removeMessage(loadingMessageNode);
+          addMessage("Sorry, we couldn't set up your chat. Your messages may not be processed.", "assistant");
+          // Even if thread creation fails, allow the user to type.
+          threadReady = false;
+          threadId = null;
+          // Still show the intro bubble so the user sees instructions.
+          introMessageNode = addMessage("Ask about previous attacks at specific beaches, number of attacks, most recent attacks, species involved, and much more", "assistant");
+        }
+      } else {
+        threadReady = true;
+        introMessageNode = addMessage("Ask about previous attacks at specific beaches, number of attacks, most recent attacks, species involved, and much more", "assistant");
+      }
+      // Enable the input regardless
+      userInput.disabled = false;
+      sendButton.disabled = false;
+    }
+
+    // -------------------------
+    // Send a message to the assistant
+    // -------------------------
+    async function sendMessageToAssistant(text) {
+      // If there's no thread, try to create one when the user sends a message.
+      if (!threadId) {
+        console.log("No thread exists. Attempting to create thread on message send...");
+        threadId = await createThread();
+        if (threadId) {
+          localStorage.setItem('safeWatersThreadId', threadId);
+          threadReady = true;
+          if (introMessageNode) {
+            removeMessage(introMessageNode);
+            introMessageNode = null;
+          }
+        } else {
+          addMessage("Unable to establish connection; your message may not be processed.", "assistant");
+          return; // Abort sending
+        }
+      }
+
+      if (introMessageNode) {
+        removeMessage(introMessageNode);
+        introMessageNode = null;
+      }
+
+      // Show user's message
+      addMessage(text, 'user');
+
+      const payload = {
+        role: 'user',
+        content: [
+          { type: 'text', text: { value: text, annotations: [] } }
+        ]
+      };
+
+      try {
+        const response = await fetch(`${BASE_URL}/threads/${threadId}/messages`, {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + API_KEY,
+            'Content-Type': 'application/json',
+            'OpenAI-Beta': 'assistants=v2'
+          },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+          throw new Error(`Error sending message: ${response.statusText}`);
+        }
+        pollAssistantMessages();
+      } catch (err) {
+        console.error("Error sending user message:", err);
+        addMessage('Sorry, there was an error sending your message.', 'assistant');
+      }
+    }
+
+    // -------------------------
+    // Poll for new assistant messages
+    // -------------------------
+    async function pollAssistantMessages() {
+      if (!threadId) return;
+      try {
+        const response = await fetch(`${BASE_URL}/threads/${threadId}/messages`, {
+          method: 'GET',
+          headers: {
+            'Authorization': 'Bearer ' + API_KEY,
+            'OpenAI-Beta': 'assistants=v2'
+          }
+        });
+        if (!response.ok) {
+          throw new Error(`Error fetching messages: ${response.statusText}`);
+        }
+        const data = await response.json();
+        if (data && data.data) {
+          data.data.forEach(msg => {
+            if (msg.role === 'assistant' && !displayedMessageIds.has(msg.id)) {
+              displayedMessageIds.add(msg.id);
+              const messageText = msg.content.map(part => part.text.value).join('\n');
+              addMessage(messageText, 'assistant');
+            }
+          });
+        }
+      } catch (err) {
+        console.error("Error polling assistant messages:", err);
+      }
+    }
+
+    // -------------------------
+    // Event Listeners for sending messages
+    // -------------------------
+    function handleSend() {
+      const text = userInput.value.trim();
+      if (text) {
+        sendMessageToAssistant(text);
+        userInput.value = '';
+      }
+    }
+    sendButton.addEventListener('click', handleSend);
+    userInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        handleSend();
+      }
+    });
+
+    // Poll for new assistant messages every 5 seconds.
+    setInterval(pollAssistantMessages, 5000);
+
+    // Initialize the thread when page loads.
+    initThread();
+  </script>
+</body>
+</html>
